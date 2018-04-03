@@ -45,14 +45,14 @@ static SLEffectSendItf bqPlayerEffectSend;
 static SLMuteSoloItf bqPlayerMuteSolo;
 static SLVolumeItf bqPlayerVolume;
 static SLmilliHertz bqPlayerSampleRate = 0;
-static jint   bqPlayerBufSize = 0;
+static jint bqPlayerBufSize = 0;
 static short *resampleBuf = NULL;
 uint8_t *out_buffer;
 int out_channer_nb;
 
 // pointer and size of the next player buffer to enqueue, and number of remaining buffers
 void *nextBuffer;
-static unsigned int nextSize;
+unsigned int nextSize;
 static int nextCount;
 
 //ffmpeg部分
@@ -63,6 +63,9 @@ AVPacket *pPacket;
 AVFrame *pFrame;
 SwrContext *swrContext;
 int audioStream = 0;
+
+int rate;
+int channel;
 
 void createBufferQueueAudioPlayer(jint sampleRate, jint bufSize);
 
@@ -100,8 +103,6 @@ Java_com_stomhong_easyplayer_MainActivity_play
     int64_t totalSec = pFormatCtx->duration / AV_TIME_BASE;
     LOGE("totalSec %lld", totalSec);
 
-
-
     //获取视频流
     audioStream = av_find_best_stream(pFormatCtx, AVMEDIA_TYPE_AUDIO, -1, -1, &pCodec, 0);
     if (audioStream < 0) {
@@ -126,13 +127,10 @@ Java_com_stomhong_easyplayer_MainActivity_play
     //    mp3  里面所包含的编码格式   转换成  pcm   SwcContext
     swrContext = swr_alloc();
 
-//    av_samples_get_buffer_size();
-//    av_samples_fill_arrays()
-
     out_buffer = (uint8_t *) av_malloc(44100 * 2);
-    uint64_t  out_ch_layout=AV_CH_LAYOUT_STEREO;
+    uint64_t out_ch_layout = AV_CH_LAYOUT_STEREO;
 //    输出采样位数  16位
-    enum AVSampleFormat out_formart=AV_SAMPLE_FMT_S16;
+    enum AVSampleFormat out_formart = AV_SAMPLE_FMT_S16;
 //输出的采样率必须与输入相同
     int out_sample_rate = pCodecCtx->sample_rate;
 
@@ -144,13 +142,13 @@ Java_com_stomhong_easyplayer_MainActivity_play
     swr_init(swrContext);
 //    获取通道数  2
     out_channer_nb = av_get_channel_layout_nb_channels(AV_CH_LAYOUT_STEREO);
-//    *rate = pCodecCtx->sample_rate;
-//    *channel = pCodecCtx->channels;
-    createBufferQueueAudioPlayer(pCodecCtx->sample_rate,pCodecCtx->channels);
+    rate = pCodecCtx->sample_rate;
+    channel = pCodecCtx->channels;
+    createBufferQueueAudioPlayer(pCodecCtx->sample_rate, pCodecCtx->channels);
 
 }
 
-int getPCM(void **pcm,size_t *pcm_size){
+void getPCM(void **pcm, size_t *pcm_size) {
 
     unsigned int index = 0;
     //循环读取数据帧
@@ -160,186 +158,115 @@ int getPCM(void **pcm,size_t *pcm_size){
             int pkt_ret = avcodec_send_packet(pCodecCtx, pPacket);
             if (pkt_ret != 0) {
                 av_packet_unref(pPacket);
-                continue;
             }
 
-            while (avcodec_receive_frame(pCodecCtx, pFrame) == 0) {
+            if (avcodec_receive_frame(pCodecCtx, pFrame)==0) {
                 LOGE("读取音频:%d", index++);
 
-                LOGE("音频声道数:%d 采样率：%d 数据格式: %d", pFrame->channels,pFrame->sample_rate,pFrame->format);
+                LOGE("音频声道数:%d 采样率：%d 数据格式: %d", pFrame->channels, pFrame->sample_rate,
+                     pFrame->format);
 
-                swr_convert(swrContext, &out_buffer, 44100 * 2, (const uint8_t **) pFrame->data, pFrame->nb_samples);
+                swr_convert(swrContext, &out_buffer, 44100 * 2, (const uint8_t **) pFrame->data,
+                            pFrame->nb_samples);
 //                缓冲区的大小
                 int size = av_samples_get_buffer_size(NULL, out_channer_nb, pFrame->nb_samples,
                                                       AV_SAMPLE_FMT_S16, 1);
                 *pcm = out_buffer;
                 *pcm_size = size;
-
-//                usleep(1000 * 40);
-
+                break;
             }
-
-
         }
     }
-
 }
 
 // create the engine and output mix objects
-//创建引擎和混响对象
+//创建引擎和输出混响对象
 JNIEXPORT JNICALL void
-Java_com_stomhong_easyplayer_MainActivity_createEngine
-        (JNIEnv* env, jclass clazz)
-{
-    SLresult result;
-
+Java_com_stomhong_easyplayer_MainActivity_createEngine(JNIEnv *env, jclass clazz) {
     // create engine
-    result = slCreateEngine(&engineObject, 0, NULL, 0, NULL, NULL);
-    (void)result;
-
+    slCreateEngine(&engineObject, 0, NULL, 0, NULL, NULL);
     // realize the engine
-    result = (*engineObject)->Realize(engineObject, SL_BOOLEAN_FALSE);
-    (void)result;
+    (*engineObject)->Realize(engineObject, SL_BOOLEAN_FALSE);
 
     // get the engine interface, which is needed in order to create other objects
-    result = (*engineObject)->GetInterface(engineObject, SL_IID_ENGINE, &engineEngine);
-    (void)result;
+    (*engineObject)->GetInterface(engineObject, SL_IID_ENGINE, &engineEngine);
 
     // create output mix, with environmental reverb specified as a non-required interface
     const SLInterfaceID ids[1] = {SL_IID_ENVIRONMENTALREVERB};
     const SLboolean req[1] = {SL_BOOLEAN_FALSE};
-    result = (*engineEngine)->CreateOutputMix(engineEngine, &outputMixObject, 1, ids, req);
-    (void)result;
+    (*engineEngine)->CreateOutputMix(engineEngine, &outputMixObject, 1, ids, req);
 
     // realize the output mix
-    result = (*outputMixObject)->Realize(outputMixObject, SL_BOOLEAN_FALSE);
-    (void)result;
+    (*outputMixObject)->Realize(outputMixObject, SL_BOOLEAN_FALSE);
 
-    // get the environmental reverb interface
-    // this could fail if the environmental reverb effect is not available,
-    // either because the feature is not present, excessive CPU load, or
-    // the required MODIFY_AUDIO_SETTINGS permission was not requested and granted
-    result = (*outputMixObject)->GetInterface(outputMixObject, SL_IID_ENVIRONMENTALREVERB,
-                                              &outputMixEnvironmentalReverb);
-    if (SL_RESULT_SUCCESS == result) {
-        result = (*outputMixEnvironmentalReverb)->SetEnvironmentalReverbProperties(
-                outputMixEnvironmentalReverb, &reverbSettings);
-        (void)result;
-    }
-    // ignore unsuccessful result codes for environmental reverb, as it is optional for this example
-    LOGE("执行到这");
+    (*outputMixObject)->GetInterface(outputMixObject, SL_IID_ENVIRONMENTALREVERB,
+                                     &outputMixEnvironmentalReverb);
+    (*outputMixEnvironmentalReverb)->SetEnvironmentalReverbProperties(outputMixEnvironmentalReverb,
+                                                                      &reverbSettings);
+
 }
 
 // create buffer queue audio player
-void createBufferQueueAudioPlayer(jint sampleRate, jint bufSize)
-{
-    SLresult result;
-    if (sampleRate >= 0 && bufSize >= 0 ) {
+void createBufferQueueAudioPlayer(jint sampleRate, jint bufSize) {
+    if (sampleRate >= 0 && bufSize >= 0) {
         bqPlayerSampleRate = sampleRate * 1000;
-        /*
-         * device native buffer size is another factor to minimize audio latency, not used in this
-         * sample: we only play one giant buffer here
-         */
         bqPlayerBufSize = bufSize;
     }
 
     // configure audio source
     SLDataLocator_AndroidSimpleBufferQueue loc_bufq = {SL_DATALOCATOR_ANDROIDSIMPLEBUFFERQUEUE, 2};
-    SLDataFormat_PCM format_pcm = {SL_DATAFORMAT_PCM, 1, SL_SAMPLINGRATE_8,
+    //
+    SLDataFormat_PCM format_pcm = {SL_DATAFORMAT_PCM,channel, rate * 1000,
                                    SL_PCMSAMPLEFORMAT_FIXED_16, SL_PCMSAMPLEFORMAT_FIXED_16,
-                                   SL_SPEAKER_FRONT_CENTER, SL_BYTEORDER_LITTLEENDIAN};
-    /*
-     * Enable Fast Audio when possible:  once we set the same rate to be the native, fast audio path
-     * will be triggered
-     */
-    if(bqPlayerSampleRate) {
-        format_pcm.samplesPerSec = bqPlayerSampleRate;       //sample rate in mili second
-    }
+                                   SL_SPEAKER_FRONT_LEFT|SL_SPEAKER_FRONT_RIGHT, SL_BYTEORDER_LITTLEENDIAN};
+
     SLDataSource audioSrc = {&loc_bufq, &format_pcm};
 
     // configure audio sink
     SLDataLocator_OutputMix loc_outmix = {SL_DATALOCATOR_OUTPUTMIX, outputMixObject};
     SLDataSink audioSnk = {&loc_outmix, NULL};
 
-    /*
-     * create audio player:
-     *     fast audio does not support when SL_IID_EFFECTSEND is required, skip it
-     *     for fast audio case
-     */
     const SLInterfaceID ids[3] = {SL_IID_BUFFERQUEUE, SL_IID_VOLUME, SL_IID_EFFECTSEND,
             /*SL_IID_MUTESOLO,*/};
     const SLboolean req[3] = {SL_BOOLEAN_TRUE, SL_BOOLEAN_TRUE, SL_BOOLEAN_TRUE,
             /*SL_BOOLEAN_TRUE,*/ };
 
-    result = (*engineEngine)->CreateAudioPlayer(engineEngine, &bqPlayerObject, &audioSrc, &audioSnk,
-                                                bqPlayerSampleRate? 2 : 3, ids, req);
+    (*engineEngine)->CreateAudioPlayer(engineEngine, &bqPlayerObject, &audioSrc, &audioSnk, 1, ids,
+                                       req);
 
-    (void)result;
-
-    // realize the player
-    result = (*bqPlayerObject)->Realize(bqPlayerObject, SL_BOOLEAN_FALSE);
-
-    (void)result;
-
-    // get the play interface
-    result = (*bqPlayerObject)->GetInterface(bqPlayerObject, SL_IID_PLAY, &bqPlayerPlay);
-
-    (void)result;
-
-    // get the buffer queue interface
-    result = (*bqPlayerObject)->GetInterface(bqPlayerObject, SL_IID_BUFFERQUEUE,
-                                             &bqPlayerBufferQueue);
-
-    (void)result;
-
-    // register callback on the buffer queue
-    result = (*bqPlayerBufferQueue)->RegisterCallback(bqPlayerBufferQueue, bqPlayerCallback, NULL);
-
-    (void)result;
-
+    //实现播放器
+    (*bqPlayerObject)->Realize(bqPlayerObject, SL_BOOLEAN_FALSE);
+    //获取播放接口
+    (*bqPlayerObject)->GetInterface(bqPlayerObject, SL_IID_PLAY, &bqPlayerPlay);
+    // 获取缓冲队列接口
+    (*bqPlayerObject)->GetInterface(bqPlayerObject, SL_IID_BUFFERQUEUE, &bqPlayerBufferQueue);
+    // 注册缓冲队列回调
+    (*bqPlayerBufferQueue)->RegisterCallback(bqPlayerBufferQueue, bqPlayerCallback, NULL);
     // get the effect send interface
     bqPlayerEffectSend = NULL;
-    if( 0 == bqPlayerSampleRate) {
-        result = (*bqPlayerObject)->GetInterface(bqPlayerObject, SL_IID_EFFECTSEND,
-                                                 &bqPlayerEffectSend);
-        (void)result;
+    if (0 == bqPlayerSampleRate) {
+        (*bqPlayerObject)->GetInterface(bqPlayerObject, SL_IID_EFFECTSEND, &bqPlayerEffectSend);
     }
-
-#if 0   // mute/solo is not supported for sources that are known to be mono, as this is
-    // get the mute/solo interface
-    result = (*bqPlayerObject)->GetInterface(bqPlayerObject, SL_IID_MUTESOLO, &bqPlayerMuteSolo);
-    assert(SL_RESULT_SUCCESS == result);
-    (void)result;
-#endif
-
-    // get the volume interface
-    result = (*bqPlayerObject)->GetInterface(bqPlayerObject, SL_IID_VOLUME, &bqPlayerVolume);
-    (void)result;
-
-    // set the player's state to playing
-    result = (*bqPlayerPlay)->SetPlayState(bqPlayerPlay, SL_PLAYSTATE_PLAYING);
-    (void)result;
-
+    // 获取声音接口
+    (*bqPlayerObject)->GetInterface(bqPlayerObject, SL_IID_VOLUME, &bqPlayerVolume);
+    // 设置播放器状态为播放
+    (*bqPlayerPlay)->SetPlayState(bqPlayerPlay, SL_PLAYSTATE_PLAYING);
     //开始播放
-    bqPlayerCallback(bqPlayerBufferQueue,NULL);
+    bqPlayerCallback(bqPlayerBufferQueue, NULL);
 }
 
-// this callback handler is called every time a buffer finishes playing
-void bqPlayerCallback(SLAndroidSimpleBufferQueueItf bq, void *context)
-{
-    getPCM(&nextBuffer,&nextSize);
-    if(nextBuffer!=NULL&&nextSize!=0) {
+void bqPlayerCallback(SLAndroidSimpleBufferQueueItf bq, void *context) {
+    getPCM(&nextBuffer, &nextSize);
+    if (nextBuffer != NULL && nextSize != 0) {
+        //将得到的数据加入到队列中
         (*bq)->Enqueue(bq, nextBuffer, nextSize);
+        LOGE("nextSize %d" ,nextSize);
     }
-
 }
 
 
-// shut down the native audio system
-JNIEXPORT JNICALL void
-Java_com_stomhong_easyplayer_MainActivity_stop
-        (JNIEnv* env, jclass clazz)
-{
+// 停止播放
+JNIEXPORT JNICALL void Java_com_stomhong_easyplayer_MainActivity_stop(JNIEnv *env, jclass clazz) {
 
     // destroy buffer queue audio player object, and invalidate all associated interfaces
     if (bqPlayerObject != NULL) {
@@ -388,10 +315,13 @@ Java_com_stomhong_easyplayer_MainActivity_stop
 
 //    pthread_mutex_destroy(&audioEngineLock);
 }
-
-JNIEXPORT JNICALL void
-Java_com_stomhong_easyplayer_MainActivity_destroy
-        (JNIEnv* env, jclass clazz){
+/**
+ * 释放资源
+ * @param env
+ * @param clazz
+ */
+JNIEXPORT  void JNICALL
+Java_com_stomhong_easyplayer_MainActivity_destroy(JNIEnv *env, jclass clazz) {
     //    //释放资源
     av_frame_free(&pFrame);
     av_packet_unref(pPacket);
